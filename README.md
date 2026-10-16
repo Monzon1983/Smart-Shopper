@@ -200,6 +200,18 @@ _Nota: Para esta refactorización, definí la lógica estructural y utilicé IA 
 
 ---
 
+### Resiliencia en Web Speech API (Watchdog Timer)
+
+Se detectó que la implementación nativa del reconocimiento de voz era propensa a bloqueos silenciosos (timeouts infinitos) en caso de pérdida de red o fallos del motor nativo, dejando la UI congelada en estado de grabación.
+**Solución implementada:** Diseñé un patrón de "Watchdog Timer" en el composable de voz. Si la API no emite resultados parciales o no cierra el proceso en un lapso de 8 segundos, el sistema fuerza la interrupción, limpia el estado y emite un error manejable, garantizando la recuperación de la UI.
+_Nota: Definí el patrón de diseño y la lógica de recuperación de estados, y utilicé IA para generar la refactorización y los unit tests en TypeScript._
+
+### Resolución de Conflictos Offline (Transacciones y Merge)
+
+El sistema original de exportación e importación de JSON generaba colisiones de datos: reemplazar pisaba la base de datos local y el modo "merge" duplicaba registros.
+**Solución implementada:** Se refactorizó la capa de datos de Dexie.js para incluir un algoritmo de reconciliación transaccional (Upsert). El sistema ahora compara UUIDs y _timestamps_ de modificación (`updatedAt`, `lastUsed`) de cada entidad. Solo se insertan registros nuevos o se sobrescriben aquellos donde la versión del JSON es estrictamente más reciente que la local, garantizando la integridad de los datos offline.
+_Nota: Definí la arquitectura de la estrategia de merge transaccional y utilicé IA para la refactorización técnica y la escritura de los tests unitarios._
+
 ## 🏗️ Tech Stack
 
 ### Core

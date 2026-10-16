@@ -2,7 +2,7 @@ import { useListsStore } from '@/stores/lists'
 import { useItemsStore } from '@/stores/items'
 import { useCategoriesStore } from '@/stores/categories'
 import { useProductsStore } from '@/stores/products'
-import type { ShoppingList, ShoppingItem, Category, Product } from '@/db'
+import { db, type Category, type Product, type ShoppingItem, type ShoppingList } from '@/db'
 
 export interface BackupData {
   version: string
@@ -18,6 +18,50 @@ export interface BackupData {
 export interface BackupValidationResult {
   valid: boolean
   errors: string[]
+}
+
+const getRecordTimestamp = (record: object): number | undefined => {
+  const timestampKeys = new Set([
+    'updatedAt',
+    'lastUsed',
+    'completedAt',
+    'addedAt',
+    'createdAt',
+    'learnedAt',
+  ])
+  const timestamps: number[] = []
+  for (const [key, value] of Object.entries(record)) {
+    if (timestampKeys.has(key) && typeof value === 'number' && Number.isFinite(value)) {
+      timestamps.push(value)
+    }
+  }
+
+  return timestamps.length > 0 ? Math.max(...timestamps) : undefined
+}
+
+const upsertNewerRecords = async <T extends object>(
+  records: T[],
+  getExisting: (key: string) => Promise<T | undefined>,
+  save: (record: T) => Promise<unknown>,
+  getKey: (record: T) => string,
+): Promise<void> => {
+  for (const incoming of records) {
+    const incomingRecord = { ...incoming }
+    const existing = await getExisting(getKey(incomingRecord))
+    if (!existing) {
+      await save(incomingRecord)
+      continue
+    }
+
+    const incomingTimestamp = getRecordTimestamp(incomingRecord)
+    const localTimestamp = getRecordTimestamp(existing)
+    if (
+      incomingTimestamp !== undefined &&
+      (localTimestamp === undefined || incomingTimestamp > localTimestamp)
+    ) {
+      await save(incomingRecord)
+    }
+  }
 }
 
 /**
@@ -164,61 +208,44 @@ export function useBackup() {
       throw new Error(`Invalid backup: ${validation.errors.join(', ')}`)
     }
 
-    // If not merging, clear existing data
-    if (!merge) {
-      // Delete all lists (this will also delete their items due to cascade)
-      const listIds = listsStore.lists.map((l) => l.id)
-      for (const id of listIds) {
-        await listsStore.deleteList(id)
+    await db.transaction('rw', db.lists, db.items, db.categories, db.products, async () => {
+      if (merge) {
+        await upsertNewerRecords(
+          backupData.lists,
+          (id) => db.lists.get(id),
+          (list) => db.lists.put(list),
+          (list) => list.id,
+        )
+        await upsertNewerRecords(
+          backupData.items,
+          (id) => db.items.get(id),
+          (item) => db.items.put(item),
+          (item) => item.id,
+        )
+        await upsertNewerRecords(
+          backupData.customCategories,
+          (id) => db.categories.get(id),
+          (category) => db.categories.put(category),
+          (category) => category.id,
+        )
+        await upsertNewerRecords(
+          backupData.products,
+          (barcode) => db.products.get(barcode),
+          (product) => db.products.put(product),
+          (product) => product.barcode,
+        )
+        return
       }
 
-      // Clear products
-      await productsStore.clearProducts()
-
-      // Delete all custom categories
-      const categoryIds = categoriesStore.customCategories.map((c) => c.id)
-      for (const id of categoryIds) {
-        await categoriesStore.deleteCategory(id)
-      }
-    }
-
-    // Restore custom categories first (they're referenced by items)
-    for (const category of backupData.customCategories) {
-      await categoriesStore.createCategory(category.name, category.icon || '📦')
-    }
-
-    // Restore products
-    for (const product of backupData.products) {
-      await productsStore.saveProduct({
-        barcode: product.barcode,
-        name: product.name,
-        category: product.category,
-      })
-    }
-
-    // Restore lists
-    for (const list of backupData.lists) {
-      const newList = await listsStore.createList(list.name, list.color)
-
-      // If list was archived, archive the new one
-      if (list.archived) {
-        await listsStore.archiveList(newList.id)
-      }
-
-      // Restore items for this list
-      const listItems = backupData.items.filter((item) => item.listId === list.id)
-      for (const item of listItems) {
-        const newItem = await itemsStore.createItem(newList.id, item.name, item.category)
-
-        // Restore item properties
-        if (item.completed) {
-          await itemsStore.toggleItemComplete(newList.id, newItem.id)
-        }
-
-        // Note: We can't restore exact timestamps or IDs as they're auto-generated
-        // But the important data (name, category, completed state) is preserved
-      }
-    }
+      await db.lists.clear()
+      await db.items.clear()
+      await db.categories.clear()
+      await db.products.clear()
+      await db.lists.bulkPut(backupData.lists.map((list) => ({ ...list })))
+      await db.items.bulkPut(backupData.items.map((item) => ({ ...item })))
+      await db.categories.bulkPut(backupData.customCategories.map((category) => ({ ...category })))
+      await db.products.bulkPut(backupData.products.map((product) => ({ ...product })))
+    })
 
     // Restore category preferences to localStorage
     if (backupData.categoryPreferences) {
@@ -240,6 +267,10 @@ export function useBackup() {
 
     // Reload all stores to reflect the restored data
     await listsStore.loadLists()
+    itemsStore.items.clear()
+    for (const list of listsStore.lists) {
+      await itemsStore.loadItems(list.id)
+    }
     await productsStore.loadProducts()
     await categoriesStore.loadCustomCategories()
   }

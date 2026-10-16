@@ -4,6 +4,7 @@ import { useBackup } from '@/composables/useBackup'
 import { useListsStore } from '@/stores/lists'
 import { useItemsStore } from '@/stores/items'
 import type { BackupData } from '@/composables/useBackup'
+import { db } from '@/db'
 
 describe('Rule 2.3: Local backup and restore', () => {
   beforeEach(() => {
@@ -162,6 +163,144 @@ describe('Rule 2.3: Local backup and restore', () => {
   })
 
   describe('Backup Restore', () => {
+    it('should merge records by key and prefer the newer timestamp', async () => {
+      const backup = useBackup()
+      const localList = {
+        id: 'list-1',
+        name: 'Local newer list',
+        createdAt: 1,
+        updatedAt: 300,
+        archived: false,
+      }
+      const localItem = {
+        id: 'item-1',
+        listId: 'list-1',
+        name: 'Local newer item',
+        quantity: 1,
+        category: 'other',
+        completed: false,
+        addedAt: 300,
+      }
+      const localCategory = {
+        id: 'custom-category',
+        name: 'Local category',
+        sortOrder: 1,
+      }
+      const localProduct = {
+        barcode: '12345678',
+        name: 'Local newer product',
+        category: 'other',
+        lastUsed: 300,
+      }
+
+      await db.lists.add(localList)
+      await db.items.add(localItem)
+      await db.categories.add(localCategory)
+      await db.products.add(localProduct)
+
+      const backupData: BackupData = {
+        version: '1.0.0',
+        timestamp: Date.now(),
+        lists: [
+          { ...localList, name: 'Older imported list', updatedAt: 200 },
+          {
+            id: 'list-2',
+            name: 'New imported list',
+            createdAt: 100,
+            updatedAt: 200,
+            archived: false,
+          },
+        ],
+        items: [
+          { ...localItem, name: 'Older imported item', addedAt: 200 },
+          {
+            id: 'item-2',
+            listId: 'list-2',
+            name: 'New imported item',
+            quantity: 1,
+            category: 'other',
+            completed: false,
+            addedAt: 200,
+          },
+        ],
+        customCategories: [
+          { ...localCategory, name: 'Imported category without timestamp' },
+          { id: 'category-2', name: 'New category', sortOrder: 2 },
+        ],
+        products: [
+          { ...localProduct, name: 'Older imported product', lastUsed: 200 },
+          {
+            barcode: '87654321',
+            name: 'New imported product',
+            category: 'other',
+            lastUsed: 200,
+          },
+        ],
+        categoryPreferences: {},
+        categoryOrder: [],
+      }
+
+      await backup.importBackup(backupData, { merge: true })
+
+      expect(await db.lists.get('list-1')).toMatchObject({ name: 'Local newer list' })
+      expect(await db.lists.get('list-2')).toMatchObject({ name: 'New imported list' })
+      expect(await db.items.get('item-1')).toMatchObject({ name: 'Local newer item' })
+      expect(await db.items.get('item-2')).toMatchObject({ name: 'New imported item' })
+      expect(await db.categories.get('custom-category')).toMatchObject({
+        name: 'Local category',
+      })
+      expect(await db.categories.get('category-2')).toMatchObject({ name: 'New category' })
+      expect(await db.products.get('12345678')).toMatchObject({
+        name: 'Local newer product',
+      })
+      expect(await db.products.get('87654321')).toMatchObject({
+        name: 'New imported product',
+      })
+      expect(await db.lists.count()).toBe(2)
+      expect(await db.items.count()).toBe(2)
+      expect(await db.categories.count()).toBe(2)
+      expect(await db.products.count()).toBe(2)
+    })
+
+    it('should replace records with newer imported timestamps', async () => {
+      const backup = useBackup()
+      await db.lists.add({
+        id: 'list-1',
+        name: 'Local older list',
+        createdAt: 1,
+        updatedAt: 100,
+        archived: false,
+      })
+
+      const backupData: BackupData = {
+        version: '1.0.0',
+        timestamp: Date.now(),
+        lists: [
+          {
+            id: 'list-1',
+            name: 'Newer imported list',
+            createdAt: 1,
+            updatedAt: 200,
+            archived: true,
+          },
+        ],
+        items: [],
+        customCategories: [],
+        products: [],
+        categoryPreferences: {},
+        categoryOrder: [],
+      }
+
+      await backup.importBackup(backupData, { merge: true })
+
+      expect(await db.lists.get('list-1')).toMatchObject({
+        name: 'Newer imported list',
+        updatedAt: 200,
+        archived: true,
+      })
+      expect(await db.lists.count()).toBe(1)
+    })
+
     it('should restore lists from backup', async () => {
       const listsStore = useListsStore()
       const itemsStore = useItemsStore()
