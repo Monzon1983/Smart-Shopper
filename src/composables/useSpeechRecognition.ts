@@ -237,19 +237,51 @@ export function useSpeechRecognition(adapter?: SpeechRecognitionAdapter) {
   const transcript = ref('')
   const error = ref<SpeechRecognitionError | null>(null)
   const isSupported = ref(recognitionAdapter.isSupported())
+  const WATCHDOG_TIMEOUT_MS = 8000
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null
+
+  const clearWatchdog = () => {
+    if (watchdogTimer !== null) {
+      clearTimeout(watchdogTimer)
+      watchdogTimer = null
+    }
+  }
+
+  const startWatchdog = () => {
+    clearWatchdog()
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = null
+      if (!isListening.value) return
+
+      isListening.value = false
+      try {
+        recognitionAdapter.stop()
+      } catch (stopError) {
+        console.error('Failed to stop timed-out speech recognition:', stopError)
+      }
+      error.value = {
+        code: 'unknown',
+        message: 'Speech recognition timed out. Please try again.',
+      }
+    }, WATCHDOG_TIMEOUT_MS)
+  }
 
   // Set up callbacks
   recognitionAdapter.onResult((result) => {
+    clearWatchdog()
     transcript.value = result.transcript
     error.value = null
+    if (isListening.value) startWatchdog()
   })
 
   recognitionAdapter.onError((err) => {
+    clearWatchdog()
     error.value = err
     isListening.value = false
   })
 
   recognitionAdapter.onEnd(() => {
+    clearWatchdog()
     isListening.value = false
   })
 
@@ -266,19 +298,27 @@ export function useSpeechRecognition(adapter?: SpeechRecognitionAdapter) {
       transcript.value = ''
       error.value = null
       isListening.value = true
+      startWatchdog()
       await recognitionAdapter.start()
     } catch (err) {
+      clearWatchdog()
       isListening.value = false
+      error.value = {
+        code: 'unknown',
+        message: err instanceof Error ? err.message : 'Failed to start speech recognition',
+      }
       console.error('Failed to start speech recognition:', err)
     }
   }
 
   const stopListening = () => {
+    clearWatchdog()
     recognitionAdapter.stop()
     isListening.value = false
   }
 
   const reset = () => {
+    clearWatchdog()
     transcript.value = ''
     error.value = null
     isListening.value = false
