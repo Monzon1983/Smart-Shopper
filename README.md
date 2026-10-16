@@ -190,6 +190,16 @@ npm run test:run
 
 ---
 
+## 🏗️ Mejoras Arquitectónicas (Refactor)
+
+### Procesamiento de Video (Web Workers)
+
+Se identificó un cuello de botella en el hilo principal (Main Thread) causado por `@zxing/library` al procesar los frames de la cámara, lo que congelaba la UI en dispositivos móviles.
+**Solución implementada:** Definí la arquitectura para desacoplar el procesamiento de video usando `OffscreenCanvas` y un Web Worker nativo. La cámara y la UI mantienen la reactividad en el hilo principal, mientras el Worker procesa la decodificación en segundo plano.
+_Nota: Para esta refactorización, definí la lógica estructural y utilicé IA como asistente de código para la implementación en TypeScript._
+
+---
+
 ## 🏗️ Tech Stack
 
 ### Core

@@ -1,5 +1,4 @@
 import { ref } from 'vue'
-import { BrowserMultiFormatReader, type Result } from '@zxing/library'
 
 export interface ScanResult {
   barcode: string
@@ -10,17 +9,26 @@ export interface BarcodeScannerAdapter {
   startScanning(
     videoElement: HTMLVideoElement,
     onDetected: (result: ScanResult) => void,
+    onError?: (error: Error) => void,
   ): Promise<void>
   stopScanning(): void
   hasCamera(): Promise<boolean>
 }
 
-/**
- * Real ZXing barcode scanner implementation
- */
+type WorkerToMainMessage =
+  | { type: 'frame-processed'; result?: ScanResult }
+  | { type: 'error'; message: string }
+
 class ZXingScanner implements BarcodeScannerAdapter {
-  private reader: BrowserMultiFormatReader | null = null
   private scanning = false
+  private sessionId = 0
+  private stream: MediaStream | null = null
+  private videoElement: HTMLVideoElement | null = null
+  private worker: Worker | null = null
+  private animationFrameId: number | null = null
+  private framePending = false
+  private lastFrameSentAt = 0
+  private onError: ((error: Error) => void) | undefined
 
   async hasCamera(): Promise<boolean> {
     try {
@@ -34,43 +42,134 @@ class ZXingScanner implements BarcodeScannerAdapter {
   async startScanning(
     videoElement: HTMLVideoElement,
     onDetected: (result: ScanResult) => void,
+    onError?: (error: Error) => void,
   ): Promise<void> {
     if (this.scanning) return
 
-    this.reader = new BrowserMultiFormatReader()
     this.scanning = true
+    this.onError = onError
+    const sessionId = ++this.sessionId
 
-    // This can throw permission errors, so let them bubble up
-    await this.reader.decodeFromVideoDevice(
-      null, // Use default camera
-      videoElement,
-      (result: Result | null, error?: Error) => {
-        if (result) {
-          onDetected({
-            barcode: result.getText(),
-            format: result.getBarcodeFormat().toString(),
-          })
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Camera access is not supported by this browser')
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' } },
+      })
+
+      if (!this.scanning || sessionId !== this.sessionId) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+
+      this.stream = stream
+      this.videoElement = videoElement
+      videoElement.srcObject = stream
+      await videoElement.play()
+
+      if (!this.scanning || sessionId !== this.sessionId) return
+
+      const worker = new Worker(new URL('../workers/barcodeScanner.worker.ts', import.meta.url), {
+        type: 'module',
+      })
+      this.worker = worker
+      worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
+        if (!this.scanning || sessionId !== this.sessionId) return
+
+        if (event.data.type === 'error') {
+          this.fail(new Error(event.data.message), sessionId)
+          return
         }
-        // Ignore errors during scanning (e.g., no barcode found in frame)
-        if (error && this.scanning) {
-          console.debug('Scanning frame:', error.message)
-        }
-      },
-    )
+
+        this.framePending = false
+        if (event.data.result) onDetected(event.data.result)
+      }
+      worker.onerror = (event) => {
+        event.preventDefault()
+        this.fail(new Error(event.message || 'Barcode scanner worker failed'), sessionId)
+      }
+      worker.onmessageerror = () => {
+        this.fail(new Error('Could not read a message from the barcode scanner worker'), sessionId)
+      }
+
+      this.scanFrames(sessionId)
+    } catch (error) {
+      this.stopScanning()
+      throw error
+    }
   }
 
   stopScanning(): void {
-    if (this.reader) {
-      this.reader.reset()
-      this.reader = null
-    }
+    this.sessionId++
     this.scanning = false
+    this.framePending = false
+    this.onError = undefined
+
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId)
+      this.animationFrameId = null
+    }
+
+    this.worker?.terminate()
+    this.worker = null
+
+    this.stream?.getTracks().forEach((track) => track.stop())
+    this.stream = null
+
+    if (this.videoElement) this.videoElement.srcObject = null
+    this.videoElement = null
+    this.lastFrameSentAt = 0
+  }
+
+  private scanFrames(sessionId: number): void {
+    const videoElement = this.videoElement
+    if (!videoElement) return
+
+    const captureFrame = async (timestamp: number) => {
+      if (!this.scanning || sessionId !== this.sessionId) return
+
+      this.animationFrameId = requestAnimationFrame(captureFrame)
+
+      if (
+        this.framePending ||
+        timestamp - this.lastFrameSentAt < 100 ||
+        videoElement.readyState < 2 ||
+        !this.worker
+      ) {
+        return
+      }
+
+      this.lastFrameSentAt = timestamp
+      this.framePending = true
+      try {
+        const bitmap = await createImageBitmap(videoElement)
+        if (!this.scanning || sessionId !== this.sessionId) {
+          bitmap.close()
+          return
+        }
+        this.worker?.postMessage({ type: 'frame', bitmap }, [bitmap])
+      } catch (error) {
+        this.fail(
+          error instanceof Error ? error : new Error('Could not capture a camera frame'),
+          sessionId,
+        )
+      }
+    }
+
+    this.animationFrameId = requestAnimationFrame(captureFrame)
+  }
+
+  private fail(error: Error, sessionId: number): void {
+    if (!this.scanning || sessionId !== this.sessionId) return
+    const onError = this.onError
+    this.stopScanning()
+    onError?.(error)
   }
 }
 
-/**
- * Mock barcode scanner for testing
- */
 class MockScanner implements BarcodeScannerAdapter {
   private mockResults: ScanResult[] = []
   private mockHasCamera = true
@@ -146,9 +245,16 @@ export function useBarcodeScanner() {
     try {
       error.value = null
       isScanning.value = true
-      await adapter.startScanning(videoElement, (result) => {
-        onDetected(result)
-      })
+      await adapter.startScanning(
+        videoElement,
+        (result) => {
+          onDetected(result)
+        },
+        (scannerError) => {
+          error.value = scannerError.message
+          isScanning.value = false
+        },
+      )
     } catch (err) {
       error.value = err instanceof Error ? err.message : 'Failed to start scanning'
       isScanning.value = false

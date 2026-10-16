@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, computed, nextTick } from 'vue'
 import { useBarcodeScanner, type ScanResult } from '@/composables/useBarcodeScanner'
 import { useCategoriesStore } from '@/stores/categories'
 import { BaseDialog, BaseButton, BaseInput, CreateCategoryDialog } from '@/components'
@@ -76,6 +76,17 @@ const handleCreateCategoryRequest = () => {
   showCreateCategory.value = true
 }
 
+const handleShowManualEntry = () => {
+  stopScanning()
+  showManualEntry.value = true
+}
+
+const handleBackToScanner = async () => {
+  showManualEntry.value = false
+  await nextTick()
+  if (props.modelValue) await initializeScanner()
+}
+
 const handleCreateCategory = async (name: string, icon: string) => {
   const category = await categoriesStore.createCategory(name, icon)
   if (category) {
@@ -85,6 +96,7 @@ const handleCreateCategory = async (name: string, icon: string) => {
 }
 
 const initializeScanner = async () => {
+  await nextTick()
   cameraPermissionDenied.value = false
   barcodeNotRecognized.value = false
   error.value = null
@@ -200,7 +212,7 @@ defineExpose({
             <BaseButton variant="secondary" @click="handleTryAgain" class="flex-1">
               Scan Again
             </BaseButton>
-            <BaseButton @click="showManualEntry = true" class="flex-1"> Enter Manually </BaseButton>
+            <BaseButton @click="handleShowManualEntry" class="flex-1"> Enter Manually </BaseButton>
           </div>
         </div>
 
@@ -265,7 +277,7 @@ defineExpose({
         </div>
 
         <div class="flex gap-3 mt-4">
-          <BaseButton variant="secondary" @click="showManualEntry = false" class="flex-1">
+          <BaseButton variant="secondary" @click="handleBackToScanner" class="flex-1">
             Back
           </BaseButton>
           <BaseButton @click="handleManualEntry" :disabled="!manualName.trim()" class="flex-1">
@@ -277,7 +289,7 @@ defineExpose({
 
     <template #actions>
       <div class="flex gap-3 justify-end w-full">
-        <BaseButton v-if="!showManualEntry" variant="secondary" @click="showManualEntry = true">
+        <BaseButton v-if="!showManualEntry" variant="secondary" @click="handleShowManualEntry">
           Enter Manually
         </BaseButton>
         <BaseButton variant="secondary" @click="handleClose"> Cancel </BaseButton>
